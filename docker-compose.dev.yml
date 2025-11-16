@@ -1,0 +1,44 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    env_file: .env.dev
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    volumes:
+      - pgdata_dev:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+
+  api:
+    build: .
+    restart: unless-stopped
+    env_file: .env.dev
+    depends_on:
+      - db
+    volumes:
+      - ./app:/app/app
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0
+      --port 8000
+      --reload
+    ports:
+      - "8000:8000"
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - api
+    volumes:
+      - ./nginx/nginx.dev.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "8080:80"
+
+volumes:
+  pgdata_dev:
