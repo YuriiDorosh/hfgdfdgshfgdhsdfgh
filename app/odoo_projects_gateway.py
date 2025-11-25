@@ -43,7 +43,93 @@ class TaskChangedIn2Response(BaseModel):
 
 
 # ==========
-# Допоміжні функції
+# НАЛАШТУВАННЯ МАПІНГУ КОРИСТУВАЧІВ
+# ==========
+
+# ЯВНИЙ mapping ID -> ID (підставиш свої)
+USER_MAP_1_TO_2: dict[int, int] = {
+    # приклад:
+    # 2: 5,   # користувач з id=2 в Odoo1 відповідає id=5 в Odoo2
+}
+
+USER_MAP_2_TO_1: dict[int, int] = {
+    # приклад:
+    # 5: 2,
+}
+
+# Fallback-користувачі (якщо ні в мапі, ні по email/login не знайшли)
+# Якщо не хочеш fallback'а — лиши None
+USER_FALLBACK_1_TO_2: Optional[int] = None  # id користувача в Odoo2
+USER_FALLBACK_2_TO_1: Optional[int] = None  # id користувача в Odoo1
+
+
+def _map_user_1_to_2(user_1, env2) -> bool | int:
+    """
+    user_1 - browse record res.users з Odoo1
+    Повертає:
+      - int (user_id в Odoo2),
+      - або False (нічого не ставимо).
+    """
+    if not user_1:
+        return False
+
+    # 1) явний mapping по ID
+    if user_1.id in USER_MAP_1_TO_2:
+        return USER_MAP_1_TO_2[user_1.id]
+
+    Users2 = env2["res.users"]
+
+    # 2) пробуємо знайти по login
+    if getattr(user_1, "login", None):
+        ids = Users2.search([("login", "=", user_1.login)], limit=1)
+        if ids:
+            return ids[0]
+
+    # 3) пробуємо знайти по email
+    if getattr(user_1, "email", None):
+        ids = Users2.search([("email", "=", user_1.email)], limit=1)
+        if ids:
+            return ids[0]
+
+    # 4) fallback
+    if USER_FALLBACK_1_TO_2 is not None:
+        return USER_FALLBACK_1_TO_2
+
+    # 5) взагалі нікого не ставимо
+    return False
+
+
+def _map_user_2_to_1(user_2, env1) -> bool | int:
+    """
+    user_2 - browse record res.users з Odoo2.
+    Аналогічно _map_user_1_to_2, але в зворотній бік.
+    """
+    if not user_2:
+        return False
+
+    if user_2.id in USER_MAP_2_TO_1:
+        return USER_MAP_2_TO_1[user_2.id]
+
+    Users1 = env1["res.users"]
+
+    if getattr(user_2, "login", None):
+        ids = Users1.search([("login", "=", user_2.login)], limit=1)
+        if ids:
+            return ids[0]
+
+    if getattr(user_2, "email", None):
+        ids = Users1.search([("email", "=", user_2.email)], limit=1)
+        if ids:
+            return ids[0]
+
+    if USER_FALLBACK_2_TO_1 is not None:
+        return USER_FALLBACK_2_TO_1
+
+    return False
+
+
+# ==========
+# Інші допоміжні функції
 # ==========
 
 
@@ -67,7 +153,7 @@ def sync_project_from_1_to_2(project_id_in_1: int) -> int:
     Читаємо project.project з Odoo 1 і створюємо/оновлюємо відповідний
     project.project в Odoo 2.
 
-    Використовуються поля-зв’язки:
+    Зв’язки:
       - в Odoo 2: project.project.x_odoo1_project_id
       - в Odoo 1: project.project.x_odoo2_project_id (опційно оновлюємо)
     """
@@ -84,12 +170,14 @@ def sync_project_from_1_to_2(project_id_in_1: int) -> int:
     # шукаємо чи вже є цей проєкт в Odoo 2
     existing_ids = Project2.search([("x_odoo1_project_id", "=", project_id_in_1)], limit=1)
 
+    # мапимо user_id
+    user_id_in_2 = _map_user_1_to_2(proj1.user_id, env2)
+
     vals_2 = {
         "name": proj1.name,
         "partner_id": proj1.partner_id.id or False,
-        "user_id": proj1.user_id.id or False,
+        "user_id": user_id_in_2,
         "company_id": proj1.company_id.id or False,
-        # поле-зв’язка
         "x_odoo1_project_id": project_id_in_1,
     }
 
@@ -100,7 +188,7 @@ def sync_project_from_1_to_2(project_id_in_1: int) -> int:
     else:
         project_id_in_2 = Project2.create(vals_2)
 
-    # опційно — зберігаємо зворотній ID в Odoo 1
+    # зворотній ID в Odoo1, якщо поле існує
     if hasattr(proj1, "x_odoo2_project_id"):
         proj1.write({"x_odoo2_project_id": project_id_in_2})
 
@@ -116,10 +204,6 @@ def sync_task_from_1_to_2(task_id_in_1: int) -> int:
     """
     Читаємо project.task з Odoo 1 і створюємо/оновлюємо відповідний
     project.task в Odoo 2.
-
-    Поля-зв’язки:
-      - в Odoo 2: project.task.x_odoo1_task_id
-      - в Odoo 1: project.task.x_odoo2_task_id (опційно оновлюємо)
     """
     env1 = odoo1_client.env
     env2 = odoo2_client.env
@@ -131,28 +215,27 @@ def sync_task_from_1_to_2(task_id_in_1: int) -> int:
     if not task1.exists():
         raise HTTPException(status_code=404, detail="task not found in Odoo 1")
 
-    # гарантуємо, що відповідний проєкт є в Odoo 2
+    # проєкт теж синкаємо
     project_id_in_2 = None
     if task1.project_id:
         project_id_in_2 = sync_project_from_1_to_2(task1.project_id.id)
 
-    # шукаємо таск по x_odoo1_task_id
     existing_ids = Task2.search([("x_odoo1_task_id", "=", task_id_in_1)], limit=1)
 
-    # мапимо stage_id по імені
     stage_id_in_2 = None
     if task1.stage_id:
         stage_id_in_2 = _map_task_stage_by_name(task1.stage_id, env2)
 
+    # мап юзера
+    user_id_in_2 = _map_user_1_to_2(task1.user_id, env2)
+
     vals_2 = {
         "name": task1.name,
-        "user_id": task1.user_id.id or False,
+        "user_id": user_id_in_2,
         "date_deadline": task1.date_deadline or False,
         "kanban_state": task1.kanban_state or "normal",
         "company_id": task1.company_id.id or False,
-        # зв’язуємо з проєктом в Odoo 2
         "project_id": project_id_in_2 or False,
-        # поле-зв’язка
         "x_odoo1_task_id": task_id_in_1,
     }
     if stage_id_in_2:
@@ -165,7 +248,6 @@ def sync_task_from_1_to_2(task_id_in_1: int) -> int:
     else:
         task_id_in_2 = Task2.create(vals_2)
 
-    # опційно — зворотнє посилання в Odoo 1
     if hasattr(task1, "x_odoo2_task_id"):
         task1.write({"x_odoo2_task_id": task_id_in_2})
 
@@ -179,9 +261,7 @@ def sync_task_from_1_to_2(task_id_in_1: int) -> int:
 
 def sync_task_from_2_to_1(task_id_in_2: int) -> int:
     """
-    Коли таск змінюється в Odoo 2 — ми оновлюємо відповідний таск у Odoo 1.
-
-    Беремо лише таски, які мають x_odoo1_task_id.
+    Коли таск змінюється в Odoo 2 — оновлюємо відповідний таск у Odoo 1.
     """
     env1 = odoo1_client.env
     env2 = odoo2_client.env
@@ -207,25 +287,21 @@ def sync_task_from_2_to_1(task_id_in_2: int) -> int:
             detail="original task not found in Odoo 1",
         )
 
-    # мапимо stage_id назад по імені
     stage_id_in_1 = None
     if task2.stage_id:
         stage_id_in_1 = _map_task_stage_by_name(task2.stage_id, env1)
 
+    # мап юзера назад
+    user_id_in_1 = _map_user_2_to_1(task2.user_id, env1)
+
     vals_1 = {
         "name": task2.name,
-        "user_id": task2.user_id.id or False,
+        "user_id": user_id_in_1,
         "date_deadline": task2.date_deadline or False,
         "kanban_state": task2.kanban_state or "normal",
     }
     if stage_id_in_1:
         vals_1["stage_id"] = stage_id_in_1
-
-    # **важливо**: description в project.task — HTML-поле з історією,
-    # в 18-ці воно інколи лагає при масових оновленнях.
-    # Якщо треба — додаси сюди description, але якщо вилізуть ValidationError
-    # про "different history for field 'description'" — просто прибери його.
-    # vals_1["description"] = task2.description
 
     task1.write(vals_1)
     return origin_id
@@ -241,9 +317,6 @@ def sync_task_from_2_to_1(task_id_in_2: int) -> int:
     response_model=SyncProjectFrom1To2Response,
 )
 def api_sync_project_from_1_to_2(payload: SyncProjectFrom1To2Request):
-    """
-    Викликається з Odoo 1 (сервер-екшн / automation), коли створили/оновили проект.
-    """
     project_id_in_2 = sync_project_from_1_to_2(payload.project_id_in_1)
     return SyncProjectFrom1To2Response(project_id_in_2=project_id_in_2)
 
@@ -253,9 +326,6 @@ def api_sync_project_from_1_to_2(payload: SyncProjectFrom1To2Request):
     response_model=SyncTaskFrom1To2Response,
 )
 def api_sync_task_from_1_to_2(payload: SyncTaskFrom1To2Request):
-    """
-    Викликається з Odoo 1, коли створили/оновили таск.
-    """
     task_id_in_2 = sync_task_from_1_to_2(payload.task_id_in_1)
     return SyncTaskFrom1To2Response(task_id_in_2=task_id_in_2)
 
@@ -265,8 +335,5 @@ def api_sync_task_from_1_to_2(payload: SyncTaskFrom1To2Request):
     response_model=TaskChangedIn2Response,
 )
 def api_task_changed_in_2(payload: TaskChangedIn2Request):
-    """
-    Викликається з Odoo 2, коли там змінили таск.
-    """
     task_id_in_1 = sync_task_from_2_to_1(payload.task_id_in_2)
     return TaskChangedIn2Response(task_id_in_1=task_id_in_1)
