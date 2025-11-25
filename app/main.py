@@ -6,6 +6,7 @@ from app.core.config import settings
 from app.core.db import Base, engine
 from app.api import proxy  # noqa: F401
 import app.models  # noqa: F401
+from .odoo_projects_gateway import router as odoo_projects_router
 
 app = FastAPI(title=settings.PROJECT_NAME)
 
@@ -37,3 +38,4 @@ async def health_check():
 
 
 app.include_router(proxy.router, prefix=settings.API_V1_STR)
+app.include_router(odoo_projects_router)
